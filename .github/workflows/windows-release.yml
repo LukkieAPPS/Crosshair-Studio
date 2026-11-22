@@ -1,0 +1,52 @@
+name: Build Windows installer and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build application folder
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --name CrosshairStudio --collect-all pynput --collect-all PySide6 --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 main.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          if (!(Test-Path "installer_output\CrosshairStudio_Setup.exe")) { throw "Installer was not created." }
+          $hash = (Get-FileHash "installer_output\CrosshairStudio_Setup.exe" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "installer_output\CrosshairStudio_Setup.exe.sha256" -Value $hash -NoNewline
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            installer_output/CrosshairStudio_Setup.exe
+            installer_output/CrosshairStudio_Setup.exe.sha256
