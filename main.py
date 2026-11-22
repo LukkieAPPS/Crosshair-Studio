@@ -754,6 +754,18 @@ class Main(QMainWindow):
         self.premium_test_active = False
         self.premium_status_checked = False
         self.premium_workers = []
+        self.pending_premium_settings = {
+            key: saved[key] for key in (
+                "gradient", "animated", "dynamic_enabled",
+                "crosshair_animation", "style"
+            ) if key in saved
+        }
+        self.s["gradient"] = False
+        self.s["animated"] = False
+        self.s["dynamic_enabled"] = False
+        self.s["crosshair_animation"] = "Off"
+        if self.s.get("style") in ("Shotgun", "Diamond", "Image"):
+            self.s["style"] = "Plus"
         saved["premium_device_id"] = self.device_id
         write(SETTINGS_FILE, saved)
         self.presets = read(PRESETS_FILE, {})
@@ -1004,7 +1016,15 @@ class Main(QMainWindow):
         if operation == "status":
             self.premium_status_checked = not bool(error)
             self.premium_test_active = bool(data) if not error else False
-            if self.premium_status_checked and not self.premium_test_active:
+            if self.premium_test_active:
+                self.s.update(self.pending_premium_settings)
+                self.style.setCurrentText(self.s.get("style", "Plus"))
+                self.gradient_box.setChecked(bool(self.s.get("gradient", False)))
+                self.animation_box.setChecked(bool(self.s.get("animated", False)))
+                self.dynamic_box.setChecked(bool(self.s.get("dynamic_enabled", False)))
+                self.crosshair_anim.setCurrentText(self.s.get("crosshair_animation", "Off"))
+                self.refresh()
+            else:
                 self.s["gradient"] = False
                 self.s["animated"] = False
                 self.s["dynamic_enabled"] = False
