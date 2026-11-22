@@ -1,4 +1,4 @@
-import json, sys, os, time, colorsys, shutil, math, urllib.request, urllib.error, hashlib, tempfile, subprocess, re
+import json, sys, os, time, colorsys, shutil, math, urllib.request, urllib.error, hashlib, tempfile, subprocess, re, uuid
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QObject, Signal, QThread
@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 HERE = Path(__file__).resolve().parent
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 GITHUB_RELEASE_API = "https://api.github.com/repos/LukkieAPPS/Crosshair-Studio/releases/latest"
+SUPABASE_URL = "https://ywlsosxhlcpommmfxvge.supabase.co"
+SUPABASE_PUBLISHABLE_KEY = "sb_publishable_oNJxRC9sU3PMHCflRNeKKw_W9gJKxom"
 
 class UpdateWorker(QThread):
     checked = Signal(object)
@@ -64,6 +66,34 @@ class UpdateWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
+
+class PremiumWorker(QThread):
+    result = Signal(str, object, str)
+
+    def __init__(self, operation, payload, parent=None):
+        super().__init__(parent)
+        self.operation = operation
+        self.payload = payload
+
+    def run(self):
+        try:
+            rpc_name = "check_premium" if self.operation == "status" else "redeem_premium_code"
+            url = SUPABASE_URL + "/rest/v1/rpc/" + rpc_name
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(self.payload).encode("utf-8"),
+                headers={
+                    "apikey": SUPABASE_PUBLISHABLE_KEY,
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=12) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            self.result.emit(self.operation, data, "")
+        except Exception as exc:
+            self.result.emit(self.operation, None, str(exc))
 
 
 # Store writable user data outside the installation directory. Windows protects
@@ -719,25 +749,18 @@ class Main(QMainWindow):
         super().__init__()
         saved = read(SETTINGS_FILE, {})
         self.s = {**DEFAULT, **{key: value for key, value in saved.items() if key in DEFAULT}}
-        # Premium-only options cannot be enabled through edited settings files on Free.
-        self.s["gradient"] = bool(self.s.get("gradient", False))
-        # Grandfather existing local test unlocks from earlier Crosshair Studio builds.
-        # This is intentionally a local legacy/free entitlement, not proof of a PayPal purchase.
-        self.legacy_free_premium = bool(
-            saved.get("legacy_free_premium", False) or saved.get("premium_test_active", False)
-        )
-        self.premium_test_active = self.legacy_free_premium
-        if not self.premium_test_active:
-            self.s["gradient"] = False
-            self.s["animated"] = False
-            for premium_key in ("dynamic_enabled",):
-                self.s[premium_key] = False
-            self.s["crosshair_animation"] = "Off"
-            if self.s.get("style") in ("Shotgun", "Diamond", "Image"):
-                self.s["style"] = "Plus"
-        if self.legacy_free_premium and not saved.get("legacy_free_premium", False):
-            saved["legacy_free_premium"] = True
-            write(SETTINGS_FILE, saved)
+        # Premium is verified online; local JSON flags are never treated as proof.
+        self.device_id = str(saved.get("premium_device_id") or uuid.uuid4())
+        self.premium_test_active = False
+        self.premium_workers = []
+        self.s["gradient"] = False
+        self.s["animated"] = False
+        self.s["dynamic_enabled"] = False
+        self.s["crosshair_animation"] = "Off"
+        if self.s.get("style") in ("Shotgun", "Diamond", "Image"):
+            self.s["style"] = "Plus"
+        saved["premium_device_id"] = self.device_id
+        write(SETTINGS_FILE, saved)
         self.presets = read(PRESETS_FILE, {})
         self.profiles = read(PROFILES_FILE, {})
         if not isinstance(self.profiles, dict):
@@ -972,6 +995,71 @@ class Main(QMainWindow):
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.toggle_overlay)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save)
         self.refresh()
+        QTimer.singleShot(350, lambda: self.start_premium_request(
+            "status", {"p_device_id": self.device_id}
+        ))
+
+    def start_premium_request(self, operation, payload):
+        worker = PremiumWorker(operation, payload, self)
+        worker.result.connect(self.on_premium_result)
+        self.premium_workers.append(worker)
+        worker.start()
+
+    def on_premium_result(self, operation, data, error):
+        if operation == "status":
+            self.premium_test_active = bool(data) if not error else False
+            self.update_premium_button()
+            self.apply_premium_gates()
+            if self.premium_test_active:
+                if self.s.get("crosshair_animation", "Off") != "Off":
+                    self.effect_timer.start(33)
+                if self.s.get("dynamic_enabled"):
+                    self.dynamic_timer.start(16)
+                if any(d.get("game") for d in self.profiles.values()):
+                    self.game_timer.start(1200)
+            return
+
+        if hasattr(self, "premium_redeem_button"):
+            self.premium_redeem_button.setEnabled(True)
+        if error:
+            QMessageBox.warning(
+                self, "Premium verification unavailable",
+                "Crosshair Studio couldn't contact the Premium server. Check your internet connection and try again.\n\n"
+                + error
+            )
+            return
+        if isinstance(data, dict) and data.get("ok"):
+            self.premium_test_active = True
+            self.update_premium_button()
+            self.apply_premium_gates()
+            if self.s.get("crosshair_animation", "Off") != "Off":
+                self.effect_timer.start(33)
+            if self.s.get("dynamic_enabled"):
+                self.dynamic_timer.start(16)
+            if any(d.get("game") for d in self.profiles.values()):
+                self.game_timer.start(1200)
+            QMessageBox.information(
+                self, "Premium activated",
+                "Crosshair Studio Premium is now active on this device."
+            )
+        else:
+            message = data.get("message", "That code is invalid or has already been redeemed.") if isinstance(data, dict) else "That code is invalid or has already been redeemed."
+            QMessageBox.warning(self, "Code not accepted", message)
+
+    def redeem_premium_code(self, code):
+        cleaned = str(code or "").strip()
+        if not cleaned:
+            QMessageBox.information(self, "Enter a code", "Type your Premium code first.")
+            return
+        if self.premium_test_active:
+            QMessageBox.information(self, "Premium active", "Premium is already active on this device.")
+            return
+        if hasattr(self, "premium_redeem_button"):
+            self.premium_redeem_button.setEnabled(False)
+        self.start_premium_request(
+            "redeem",
+            {"p_code": cleaned, "p_device_id": self.device_id}
+        )
 
     def check_for_updates(self):
         if getattr(self, "update_worker", None) and self.update_worker.isRunning():
@@ -1104,7 +1192,7 @@ class Main(QMainWindow):
     def require_premium(self):
         if self.premium_test_active:
             return True
-        QMessageBox.information(self, "Premium feature", "This feature is part of Crosshair Studio Premium (€3 one-time). Online checkout and licence verification are not connected in this release candidate yet.")
+        QMessageBox.information(self, "Premium feature", "This feature requires Crosshair Studio Premium. Open Get Premium and redeem a valid one-time code.")
         return False
 
     def apply_premium_gates(self):
@@ -1136,10 +1224,22 @@ class Main(QMainWindow):
         desc = QLabel("PREMIUM FEATURES\n\n• Advanced Drawing Studio: freehand, lines, premade shapes, selection, move, copy/paste, rotational 2-way and 4-way mirror, undo/redo\n• Per-pixel Auto Contrast Mode: every visible crosshair pixel adapts to the background directly behind it\n• Dynamic Crosshair: smooth WASD-reactive spread (input-based approximation)\n• Crosshair animations: pulse, rotate, fade and smooth transitions\n• RGB and gradient colours\n• PNG/JPG/SVG image uploads and custom image crosshairs\n• Advanced reticle styles\n• Keyboard/mouse profile hotkeys (press or release)\n• Automatic game profile switching\n• Profile export and backup\n\nALL PRESETS ARE FREE. Free users can save and load profiles, but assigning hotkeys requires Premium.\n\nDynamic spread reacts to WASD key input, not Fortnite weapon state.")
         desc.setWordWrap(True)
         layout.addWidget(desc)
-        note = QLabel("PayPal one-time checkout is planned, but it is not connected in this build. No payment is taken here. Existing users with Premium test mode from an earlier version keep their grandfathered free access on this PC.")
+        note = QLabel("Redeem a one-time Premium code below. A successful code is consumed globally and activates Premium on this device. Online checkout is not connected yet.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#c9a66b;font-size:11px")
         layout.addWidget(note)
+        code_label = QLabel("PREMIUM REDEMPTION CODE")
+        code_label.setStyleSheet("font-size:10px;color:#999;font-weight:700")
+        layout.addWidget(code_label)
+        code_input = QLineEdit()
+        code_input.setPlaceholderText("Enter your Premium code")
+        code_input.setMaxLength(100)
+        layout.addWidget(code_input)
+        self.premium_redeem_button = QPushButton("Redeem code")
+        self.premium_redeem_button.clicked.connect(
+            lambda: self.redeem_premium_code(code_input.text())
+        )
+        layout.addWidget(self.premium_redeem_button)
         close = QPushButton("Close")
         close.clicked.connect(dialog.accept)
         layout.addWidget(close)
@@ -1286,8 +1386,7 @@ class Main(QMainWindow):
     def save(self):
         self.s["style"] = self.style.currentText()
         data = dict(self.s)
-        data["premium_test_active"] = self.premium_test_active
-        data["legacy_free_premium"] = self.legacy_free_premium
+        data["premium_device_id"] = self.device_id
         write(SETTINGS_FILE, data)
         QMessageBox.information(self, "Saved", "Settings saved on this PC.")
 
