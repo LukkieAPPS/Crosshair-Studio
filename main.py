@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 HERE = Path(__file__).resolve().parent
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 GITHUB_RELEASE_API = "https://api.github.com/repos/LukkieAPPS/Crosshair-Studio/releases/latest"
 SUPABASE_URL = "https://ywlsosxhlcpommmfxvge.supabase.co"
 SUPABASE_PUBLISHABLE_KEY = "sb_publishable_oNJxRC9sU3PMHCflRNeKKw_W9gJKxom"
@@ -1005,6 +1005,8 @@ class Main(QMainWindow):
         QTimer.singleShot(350, lambda: self.start_premium_request(
             "status", {"p_device_id": self.device_id}
         ))
+        # Check for a newer release after the main window has appeared.
+        QTimer.singleShot(1800, self.check_for_updates)
 
     def start_premium_request(self, operation, payload):
         worker = PremiumWorker(operation, payload, self)
