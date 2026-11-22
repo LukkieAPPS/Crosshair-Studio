@@ -20,7 +20,9 @@ Settings, presets, and profiles are stored in `%APPDATA%/Crosshair Studio`, not 
 
 ## Notes
 
-- This repository currently contains source and build scripts. A downloadable installer and automatic update delivery are not published yet.
+- The app checks GitHub Releases for newer versions after launch. Updates are offered in-app, downloaded in the background, and SHA-256 verified before installation.
+- For updates to be detected, publish a GitHub Release with tag `v1.0.2` (or higher) and attach `CrosshairStudio_Setup.exe` plus a text file named `CrosshairStudio_Setup.exe.sha256` containing the installer's 64-character SHA-256 hash.
+- The updater is included in source; the first packaged installer and release assets still need to be built and uploaded from Windows.
 - The app does not read or modify game memory and does not provide aiming assistance.
 - Premium labels in this source are not a working payment or licence system. No payments are processed.
 - Global keyboard/mouse hooks may be restricted by some games or security software; compatibility is not guaranteed.
