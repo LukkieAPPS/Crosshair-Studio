@@ -1,7 +1,7 @@
-import json, sys, os, time, colorsys, shutil, math
+import json, sys, os, time, colorsys, shutil, math, urllib.request, urllib.error, hashlib, tempfile, subprocess, re
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QObject, Signal
+from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QObject, Signal, QThread
 from PySide6.QtGui import (
     QColor, QPainter, QPen, QBrush, QPixmap, QImage, QKeySequence, QShortcut, QImageReader,
     QLinearGradient, QPainterPath
@@ -15,6 +15,56 @@ from PySide6.QtWidgets import (
 from PySide6.QtSvg import QSvgRenderer
 
 HERE = Path(__file__).resolve().parent
+APP_VERSION = "1.0.1"
+GITHUB_RELEASE_API = "https://api.github.com/repos/LukkieAPPS/Crosshair-Studio/releases/latest"
+
+class UpdateWorker(QThread):
+    checked = Signal(object)
+    downloaded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, download_url=None, checksum_url=None, parent=None):
+        super().__init__(parent)
+        self.download_url = download_url
+        self.checksum_url = checksum_url
+
+    def run(self):
+        try:
+            request = urllib.request.Request(GITHUB_RELEASE_API, headers={"User-Agent": "Crosshair-Studio-Updater"})
+            with urllib.request.urlopen(request, timeout=8) as response:
+                release = json.loads(response.read().decode("utf-8"))
+            if not self.download_url:
+                tag = str(release.get("tag_name", "")).lstrip("vV")
+                match = re.match(r"^(\d+)\.(\d+)\.(\d+)", tag)
+                current = tuple(map(int, APP_VERSION.split(".")))
+                latest = tuple(map(int, match.groups())) if match else current
+                assets = release.get("assets", [])
+                installer = next((a for a in assets if a.get("name") == "CrosshairStudio_Setup.exe"), None)
+                checksum = next((a for a in assets if a.get("name") == "CrosshairStudio_Setup.exe.sha256"), None)
+                if latest > current and installer and checksum:
+                    self.checked.emit({"version": tag, "installer": installer.get("browser_download_url"), "checksum": checksum.get("browser_download_url"), "notes": str(release.get("body", ""))[:1200]})
+                else:
+                    self.checked.emit(None)
+                return
+            def fetch(url):
+                req = urllib.request.Request(url, headers={"User-Agent": "Crosshair-Studio-Updater"})
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    return response.read()
+            installer_data = fetch(self.download_url)
+            checksum_text = fetch(self.checksum_url).decode("utf-8", errors="replace")
+            expected = re.search(r"\b([a-fA-F0-9]{64})\b", checksum_text)
+            if not expected:
+                raise ValueError("The release checksum file is invalid.")
+            actual = hashlib.sha256(installer_data).hexdigest()
+            if actual.lower() != expected.group(1).lower():
+                raise ValueError("The installer checksum did not match. The update was cancelled.")
+            target = Path(tempfile.gettempdir()) / "CrosshairStudio_Update_Setup.exe"
+            target.write_bytes(installer_data)
+            self.downloaded.emit(str(target))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 
 # Store writable user data outside the installation directory. Windows protects
 # Program Files, so writing JSON files beside an installed EXE can fail.
@@ -922,6 +972,52 @@ class Main(QMainWindow):
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.toggle_overlay)
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.save)
         self.refresh()
+
+    def check_for_updates(self):
+        if getattr(self, "update_worker", None) and self.update_worker.isRunning():
+            return
+        self.update_worker = UpdateWorker(parent=self)
+        self.update_worker.checked.connect(self.on_update_check_result)
+        self.update_worker.failed.connect(lambda _message: None)
+        self.update_worker.start()
+
+    def on_update_check_result(self, info):
+        if not info:
+            return
+        answer = QMessageBox.question(
+            self, "Crosshair Studio update available",
+            f"Version {info['version']} is available. You have {APP_VERSION}.\n\n"
+            "Download and install this update now? Your saved profiles and settings are kept.\n\n"
+            "The installer is verified with SHA-256 before it runs.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.update_worker = UpdateWorker(info["installer"], info["checksum"], self)
+        self.update_worker.downloaded.connect(self.launch_verified_update)
+        self.update_worker.failed.connect(lambda message: QMessageBox.warning(self, "Update failed", message))
+        self.update_worker.start()
+
+    def launch_verified_update(self, installer_path):
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Update downloaded", "The installer was downloaded and verified. Close the source version and run the installer manually.")
+            return
+        app_exe = Path(sys.executable).resolve()
+        installer = Path(installer_path).resolve()
+        script = Path(tempfile.gettempdir()) / "CrosshairStudio_Update_Install.bat"
+        pid = os.getpid()
+        script.write_text(
+            "@echo off\r\n"
+            f":wait\r\ntasklist /FI \"PID eq {pid}\" | find \"{pid}\" >nul\r\n"
+            "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
+            f'start /wait "" "{installer}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\r\n'
+            f'start "" "{app_exe}"\r\n'
+            'del "%~f0"\r\n', encoding="utf-8"
+        )
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=flags)
+        QApplication.quit()
 
     def on_style_changed(self, value):
         if value in ("Shotgun", "Diamond", "Image") and not self.require_premium():
