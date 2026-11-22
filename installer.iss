@@ -1,5 +1,5 @@
 #define MyAppName "Crosshair Studio"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "Crosshair Studio"
 #define MyAppExeName "CrosshairStudio.exe"
 
