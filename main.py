@@ -752,13 +752,8 @@ class Main(QMainWindow):
         # Premium is verified online; local JSON flags are never treated as proof.
         self.device_id = str(saved.get("premium_device_id") or uuid.uuid4())
         self.premium_test_active = False
+        self.premium_status_checked = False
         self.premium_workers = []
-        self.s["gradient"] = False
-        self.s["animated"] = False
-        self.s["dynamic_enabled"] = False
-        self.s["crosshair_animation"] = "Off"
-        if self.s.get("style") in ("Shotgun", "Diamond", "Image"):
-            self.s["style"] = "Plus"
         saved["premium_device_id"] = self.device_id
         write(SETTINGS_FILE, saved)
         self.presets = read(PRESETS_FILE, {})
@@ -981,7 +976,7 @@ class Main(QMainWindow):
         self.animation_timer = QTimer(self)
         self.animation_timer.timeout.connect(self.animate)
         # No background timer when RGB animation is disabled.
-        if self.s.get("animated"):
+        if self.premium_test_active and self.s.get("animated"):
             self.animation_timer.start(40)
         self.game_timer = QTimer(self)
         self.game_timer.timeout.connect(self.check_game_profile)
@@ -1007,10 +1002,25 @@ class Main(QMainWindow):
 
     def on_premium_result(self, operation, data, error):
         if operation == "status":
+            self.premium_status_checked = not bool(error)
             self.premium_test_active = bool(data) if not error else False
+            if self.premium_status_checked and not self.premium_test_active:
+                self.s["gradient"] = False
+                self.s["animated"] = False
+                self.s["dynamic_enabled"] = False
+                self.s["crosshair_animation"] = "Off"
+                if self.style.currentText() in ("Shotgun", "Diamond", "Image"):
+                    self.style.setCurrentText("Plus")
+                self.gradient_box.setChecked(False)
+                self.animation_box.setChecked(False)
+                self.dynamic_box.setChecked(False)
+                self.crosshair_anim.setCurrentText("Off")
+                self.refresh()
             self.update_premium_button()
             self.apply_premium_gates()
             if self.premium_test_active:
+                if self.s.get("animated") and not self.animation_timer.isActive():
+                    self.animation_timer.start(40)
                 if self.s.get("crosshair_animation", "Off") != "Off":
                     self.effect_timer.start(33)
                 if self.s.get("dynamic_enabled"):
@@ -1019,8 +1029,10 @@ class Main(QMainWindow):
                     self.game_timer.start(1200)
             return
 
-        if hasattr(self, "premium_redeem_button"):
+        try:
             self.premium_redeem_button.setEnabled(True)
+        except (AttributeError, RuntimeError):
+            pass
         if error:
             QMessageBox.warning(
                 self, "Premium verification unavailable",
@@ -1357,7 +1369,7 @@ class Main(QMainWindow):
         self.refresh()
 
     def refresh(self):
-        if not self.premium_test_active:
+        if self.premium_status_checked and not self.premium_test_active:
             self.s["gradient"] = False
             self.s["animated"] = False
             if self.style.currentText() in ("Shotgun", "Diamond", "Image"):
